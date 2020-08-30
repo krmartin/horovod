@@ -154,6 +154,111 @@ class MXTests(unittest.TestCase):
             assert almost_equal(tensor.asnumpy(), multiplied.asnumpy(), atol=threshold), \
                 f'hvd.allreduce produces incorrect results for self: {hvd.rank()} {count} {dtype} {dim}'
 
+    def test_horovod_allreduce_prescale(self):
+        """Test that the allreduce correctly sums 1D, 2D, 3D tensors with prescaling."""
+        hvd.init()
+        size = hvd.size()
+        dtypes = self.filter_supported_types(['int32',   'int64',
+                                              'float16', 'float32', 'float64'])
+        int_types = ['int32', 'int64']
+        dims = [1, 2, 3]
+        ctx = self._current_context()
+        count = 1
+        shapes = [(), (17), (17, 17), (17, 17, 17)]
+        for dtype, dim in itertools.product(dtypes, dims):
+            mx.random.seed(1234, ctx=ctx)
+            np.random.seed(1234)
+            tensor = mx.nd.random.uniform(-100, 100, shape=shapes[dim],
+                                          ctx=ctx)
+            tensor = tensor.astype(dtype)
+            factor = np.random.uniform()
+            scaled = hvd.allreduce(tensor, average=False, name=str(count),
+                                   prescale_factor=factor)
+
+            factor = mx.nd.array([factor], dtype='float64', ctx=ctx)
+            if ctx != mx.cpu() and not int(os.environ.get('HOROVOD_MIXED_INSTALL', 0)):
+                # For integer types, scaling done in FP64
+                factor = factor.astype('float64' if dtype in int_types else dtype)
+                tensor = tensor.astype('float64' if dtype in int_types else dtype)
+            else:
+                # For integer types, scaling done in FP64, FP32 math for FP16 on CPU
+                factor = factor.astype('float32' if dtype == 'float16' else
+                                       'float64' if dtype in int_types else dtype)
+                tensor = tensor.astype('float32' if dtype == 'float16' else
+                                       'float64' if dtype in int_types else dtype)
+
+            expected = factor * tensor
+            expected = expected.astype(dtype)
+            expected *= size
+            count += 1
+
+            # Threshold for floating point equality depends on number of
+            # ranks, since we're comparing against precise multiplication.
+            if size <= 3 or dtype in int_types:
+                threshold = 0
+            elif size < 10:
+                threshold = 1e-4
+            elif size < 15:
+                threshold = 5e-4
+            else:
+                break
+
+            assert almost_equal(expected.asnumpy(), scaled.asnumpy(), atol=threshold), \
+                f'hvd.allreduce produces incorrect results for prescaling: {hvd.rank()} {count} {dtype} {dim}'
+
+    def test_horovod_allreduce_postscale(self):
+        """Test that the allreduce correctly sums 1D, 2D, 3D tensors with postscaling."""
+        hvd.init()
+        size = hvd.size()
+        dtypes = self.filter_supported_types(['int32',   'int64',
+                                              'float16', 'float32', 'float64'])
+        int_types = ['int32', 'int64']
+        dims = [1, 2, 3]
+        ctx = self._current_context()
+        count = 1
+        shapes = [(), (17), (17, 17), (17, 17, 17)]
+        for dtype, dim in itertools.product(dtypes, dims):
+            mx.random.seed(1234, ctx=ctx)
+            np.random.seed(1234)
+            tensor = mx.nd.random.uniform(-100, 100, shape=shapes[dim],
+                                          ctx=ctx)
+            tensor = tensor.astype(dtype)
+            factor = np.random.uniform()
+            scaled = hvd.allreduce(tensor, average=False, name=str(count),
+                                   postscale_factor=factor)
+
+            factor = mx.nd.array([factor], dtype='float64', ctx=ctx)
+            if ctx != mx.cpu() and not int(os.environ.get('HOROVOD_MIXED_INSTALL', 0)):
+                # For integer types, scaling done in FP64
+                factor = factor.astype('float64' if dtype in int_types else dtype)
+                tensor = tensor.astype('float64' if dtype in int_types else dtype)
+            else:
+                # For integer types, scaling done in FP64, FP32 math for FP16 on CPU
+                factor = factor.astype('float32' if dtype == 'float16' else
+                                       'float64' if dtype in int_types else dtype)
+                tensor = tensor.astype('float32' if dtype == 'float16' else
+                                       'float64' if dtype in int_types else dtype)
+
+            expected = tensor * size
+            expected *= factor
+            expected = expected.astype(dtype)
+            count += 1
+
+            # Threshold for floating point equality depends on number of
+            # ranks, since we're comparing against precise multiplication.
+            if size <= 3 or dtype in int_types:
+                threshold = 0
+            elif size < 10:
+                threshold = 1e-4
+            elif size < 15:
+                threshold = 5e-4
+            else:
+                break
+
+            assert almost_equal(expected.asnumpy(), scaled.asnumpy(), atol=threshold), \
+                f'hvd.allreduce produces incorrect results for pre/post scaling: {hvd.rank()} {count} {dtype} {dim}'
+
+
     def test_horovod_allreduce_error(self):
         """Test that the allreduce raises an error if different ranks try to
            send tensors of different rank or dimension."""
@@ -609,15 +714,30 @@ class MXTests(unittest.TestCase):
         # To prevent premature shutdown from rank 0 for this test
         mx.nd.waitall()
 
+    def test_allgather_object(self):
+        hvd.init()
+
+        d = {'metric_val_1': hvd.rank()}
+        if hvd.rank() == 1:
+            d['metric_val_2'] = 42
+
+        results = hvd.allgather_object(d)
+
+        expected = [{'metric_val_1': i} for i in range(hvd.size())]
+        if hvd.size() > 1:
+            expected[1] = {'metric_val_1': 1, 'metric_val_2': 42}
+
+        self.assertEqual(len(results), hvd.size())
+        self.assertListEqual(results, expected)
+
+        # To prevent premature shutdown from rank 0 for this test
+        mx.nd.waitall()
+
     def test_horovod_alltoall(self):
         """Test that the alltoall correctly distributes 1D, 2D, and 3D tensors."""
         hvd.init()
         rank = hvd.rank()
         size = hvd.size()
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -649,10 +769,6 @@ class MXTests(unittest.TestCase):
         hvd.init()
         rank = hvd.rank()
         size = hvd.size()
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -688,10 +804,6 @@ class MXTests(unittest.TestCase):
         if size == 1:
             self.skipTest("Only one worker available")
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
             self.skipTest("NCCL-based Alltoall requires NCCL version >= 2.7.0.")
@@ -722,10 +834,6 @@ class MXTests(unittest.TestCase):
         if size == 1:
             self.skipTest("Only one worker available")
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
             self.skipTest("NCCL-based Alltoall requires NCCL version >= 2.7.0.")
@@ -747,9 +855,9 @@ class MXTests(unittest.TestCase):
         rank = hvd.rank()
         size = hvd.size()
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
+        # This test does not apply if there is only one worker.
+        if size == 1:
+            self.skipTest("Only one worker available")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -772,10 +880,6 @@ class MXTests(unittest.TestCase):
         hvd.init()
         rank = hvd.rank()
         size = hvd.size()
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -800,10 +904,6 @@ class MXTests(unittest.TestCase):
         # This test does not apply if there is only one worker.
         if size == 1:
             self.skipTest("Only one worker available")
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:

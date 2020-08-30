@@ -67,11 +67,17 @@ above is installed.
 MXNet
 ~~~~~
 
-To ensure that Horovod is built with MXNet support enabled:
+To ensure that Horovod is built with MXNet CPU support enabled:
 
 .. code-block:: bash
 
     $ HOROVOD_WITH_MXNET=1 pip install horovod[mxnet]
+
+To ensure that Horovod is built with MXNet GPU support enabled for CUDA 10.2:
+
+.. code-block:: bash
+
+    $ HOROVOD_WITH_MXNET=1 pip install horovod[mxnet-cu102]
 
 To skip MXNet, set ``HOROVOD_WITHOUT_MXNET=1`` in your environment.
 
@@ -218,6 +224,7 @@ Possible values are given in curly brackets: {}.
 * ``HOROVOD_CUDA_HOME`` - path where CUDA include and lib directories can be found.
 * ``HOROVOD_CUDA_INCLUDE`` - path to CUDA include directory.
 * ``HOROVOD_CUDA_LIB`` - path to CUDA lib directory.
+* ``HOROVOD_BUILD_CUDA_CC_LIST`` - List of compute capabilities to build Horovod CUDA kernels for (example: ``HOROVOD_BUILD_CUDA_CC_LIST=60,70,75``)
 * ``HOROVOD_ROCM_HOME`` - path where ROCm include and lib directories can be found.
 * ``HOROVOD_NCCL_HOME`` - path where NCCL include and lib directories can be found.
 * ``HOROVOD_NCCL_INCLUDE`` - path to NCCL include directory.

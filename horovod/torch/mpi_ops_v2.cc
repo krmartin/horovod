@@ -17,7 +17,6 @@
 
 #include <chrono>
 #include <memory>
-#include <pthread.h>
 #include <thread>
 #include <torch/extension.h>
 #include <torch/torch.h>
@@ -63,7 +62,8 @@ void DivideInPlace(::torch::Tensor& tensor, int divisor) {
 }
 
 int DoAllreduce(::torch::Tensor tensor, ::torch::Tensor output, int divisor,
-                const std::string& name, int reduce_op_int) {
+                const std::string& name, int reduce_op_int,
+                double prescale_factor, double postscale_factor) {
   ThrowIfError(common::CheckInitialized());
 
   auto handle = handle_manager.AllocateHandle();
@@ -84,14 +84,15 @@ int DoAllreduce(::torch::Tensor tensor, ::torch::Tensor output, int divisor,
           DivideInPlace(output, divisor);
         }
         handle_manager.MarkDone(handle, status);
-      }, reduce_op);
+      }, reduce_op, prescale_factor, postscale_factor);
   ThrowIfError(enqueue_result);
 
   return handle;
 }
 
 int DoAllreduceCudaOnCPU(::torch::Tensor tensor, ::torch::Tensor output, int divisor,
-                         const std::string& name, int reduce_op_int) {
+                         const std::string& name, int reduce_op_int,
+                         double prescale_factor, double postscale_factor) {
   ThrowIfError(common::CheckInitialized());
 
   // Make async copy of input tensor to CPU tensor and record completion event.
@@ -119,7 +120,7 @@ int DoAllreduceCudaOnCPU(::torch::Tensor tensor, ::torch::Tensor output, int div
           DivideInPlace(output, divisor);
         }
         handle_manager.MarkDone(handle, status);
-      }, reduce_op);
+      }, reduce_op, prescale_factor, postscale_factor);
   ThrowIfError(enqueue_result);
 
   return handle;
@@ -310,7 +311,7 @@ int PollHandle(int handle) { return handle_manager.PollHandle(handle) ? 1 : 0; }
 void WaitAndClear(int handle) {
   while (true) {
     if (handle_manager.PollHandle(handle)) break;
-    pthread_yield();
+    std::this_thread::yield();
   }
   auto status = handle_manager.ReleaseHandle(handle);
   ThrowIfError(*status);
@@ -338,6 +339,10 @@ int DoJoin(int device) {
 
   WaitAndClear(handle);
   return handle;
+}
+
+void Reset() {
+  handle_manager.Reset();
 }
 
 
@@ -484,6 +489,7 @@ PYBIND11_MODULE(mpi_lib_v2, m) {
   // basics
   m.def("horovod_torch_poll", &PollHandle);
   m.def("horovod_torch_wait_and_clear", &WaitAndClear);
+  m.def("horovod_torch_reset", &Reset);
 }
 
 } // namespace torch

@@ -247,6 +247,90 @@ class TensorFlowTests(tf.test.TestCase):
         self.assertTrue(self.evaluate(tf.reduce_all(tests)),
                         "hvd.allreduce produces incorrect results")
 
+    # Note: TF does not support FP64 op attributes so scaling factor is cast to FP32
+    # by op and loses precision. We skip FP64 version of pre/postscale tests for this reason.
+    # See https://github.com/tensorflow/tensorflow/pull/39452 for PR to resolve this limitation.
+    def test_horovod_allreduce_cpu_prescale(self):
+        """Test on CPU that the allreduce correctly sums 1D, 2D, 3D tensors
+           with prescaling"""
+        hvd.init()
+        size = hvd.size()
+        dtypes = self.filter_supported_types([tf.int32, tf.int64, tf.float16, tf.float32])
+        int_types = [tf.int32, tf.int64]
+        dims = [1, 2, 3]
+        for dtype, dim in itertools.product(dtypes, dims):
+            with tf.device("/cpu:0"):
+                np.random.seed(1234)
+                factor = np.random.uniform()
+                tensor = self.random_uniform(
+                    [17] * dim, -100, 100, dtype=dtype)
+                summed = hvd.allreduce(tensor, average=False,
+                                       prescale_factor=factor)
+
+                # Scaling done in FP64 math for integer types, FP32 math for FP16 on CPU
+                tensor = tf.cast(tensor, tf.float32 if dtype == tf.float16 else
+                                 tf.float64 if dtype in int_types else dtype)
+                factor = tf.convert_to_tensor(factor, tf.float32 if dtype == tf.float16 else
+                                              tf.float64 if dtype in int_types else dtype)
+                multiplied = tf.cast(factor * tensor, dtype) * size
+                max_difference = tf.reduce_max(tf.abs(summed - multiplied))
+
+            # Threshold for floating point equality depends on number of
+            # ranks, since we're comparing against precise multiplication.
+            if size <= 3 or dtype in int_types:
+                threshold = 0
+            elif size < 10:
+                threshold = 1e-4
+            elif size < 15:
+                threshold = 5e-4
+            else:
+                break
+
+            diff = self.evaluate(max_difference)
+            self.assertTrue(diff <= threshold,
+                            "hvd.allreduce produces incorrect results")
+
+    def test_horovod_allreduce_cpu_postscale(self):
+        """Test on CPU that the allreduce correctly sums 1D, 2D, 3D tensors
+           with postscaling"""
+        hvd.init()
+        size = hvd.size()
+        dtypes = self.filter_supported_types([tf.int32, tf.int64, tf.float16, tf.float32])
+        int_types = [tf.int32, tf.int64]
+        dims = [1, 2, 3]
+        for dtype, dim in itertools.product(dtypes, dims):
+            with tf.device("/cpu:0"):
+                np.random.seed(1234)
+                factor = np.random.uniform()
+                tensor = self.random_uniform(
+                    [17] * dim, -100, 100, dtype=dtype)
+                summed = hvd.allreduce(tensor, average=False,
+                                       postscale_factor=factor)
+
+                multiplied = tensor * size
+                # Scaling done in FP64 math for integer types, FP32 math for FP16 on CPU
+                multiplied = tf.cast(multiplied, tf.float32 if dtype == tf.float16 else
+                                     tf.float64 if dtype in int_types else dtype)
+                factor = tf.convert_to_tensor(factor, tf.float32 if dtype == tf.float16 else
+                                              tf.float64 if dtype in int_types else dtype)
+                multiplied = tf.cast(factor * multiplied, dtype)
+                max_difference = tf.reduce_max(tf.abs(summed - multiplied))
+
+            # Threshold for floating point equality depends on number of
+            # ranks, since we're comparing against precise multiplication.
+            if size <= 3 or dtype in int_types:
+                threshold = 0
+            elif size < 10:
+                threshold = 1e-4
+            elif size < 15:
+                threshold = 5e-4
+            else:
+                break
+
+            diff = self.evaluate(max_difference)
+            self.assertTrue(diff <= threshold,
+                            "hvd.allreduce produces incorrect results")
+
     def test_horovod_allreduce_gpu(self):
         """Test that the allreduce works on GPUs."""
         # Only do this test if there are GPUs available.
@@ -416,6 +500,103 @@ class TensorFlowTests(tf.test.TestCase):
             diff = self.evaluate(max_difference)
             self.assertTrue(diff <= threshold,
                             "hvd.allreduce on GPU produces incorrect results")
+
+    def test_horovod_allreduce_gpu_prescale(self):
+        """Test on GPU that the allreduce correctly sums 1D, 2D, 3D tensors
+           with prescaling"""
+
+        # Only do this test if there are GPUs available.
+        if not tf.test.is_gpu_available(cuda_only=True):
+            return
+
+        if int(os.environ.get('HOROVOD_MIXED_INSTALL', 0)):
+            # Skip if compiled with CUDA but without HOROVOD_GPU_ALLREDUCE.
+            return
+
+        hvd.init()
+        size = hvd.size()
+        local_rank = hvd.local_rank()
+        dtypes = self.filter_supported_types([tf.int32, tf.int64, tf.float16, tf.float32])
+        int_types = [tf.int32, tf.int64]
+        dims = [1, 2, 3]
+        for dtype, dim in itertools.product(dtypes, dims):
+            with tf.device("/gpu:%s" % local_rank):
+                np.random.seed(1234)
+                factor = np.random.uniform()
+                tensor = self.random_uniform(
+                    [17] * dim, -100, 100, dtype=dtype)
+                summed = hvd.allreduce(tensor, average=False,
+                                       prescale_factor=factor)
+
+                # Scaling done in FP64 math for integer types.
+                tensor = tf.cast(tensor, tf.float64 if dtype in int_types else dtype)
+                factor = tf.convert_to_tensor(factor, tf.float64 if dtype in int_types else dtype)
+                multiplied = tf.cast(factor * tensor, dtype) * size
+                max_difference = tf.reduce_max(tf.abs(summed - multiplied))
+
+            # Threshold for floating point equality depends on number of
+            # ranks, since we're comparing against precise multiplication.
+            if size <= 3 or dtype in int_types:
+                threshold = 0
+            elif size < 10:
+                threshold = 1e-4
+            elif size < 15:
+                threshold = 5e-4
+            else:
+                break
+
+            diff = self.evaluate(max_difference)
+            self.assertTrue(diff <= threshold,
+                            "hvd.allreduce produces incorrect results")
+
+    def test_horovod_allreduce_gpu_postscale(self):
+        """Test on GPU that the allreduce correctly sums 1D, 2D, 3D tensors
+           with postscaling"""
+
+        # Only do this test if there are GPUs available.
+        if not tf.test.is_gpu_available(cuda_only=True):
+            return
+
+        if int(os.environ.get('HOROVOD_MIXED_INSTALL', 0)):
+            # Skip if compiled with CUDA but without HOROVOD_GPU_ALLREDUCE.
+            return
+
+        hvd.init()
+        size = hvd.size()
+        local_rank = hvd.local_rank()
+        dtypes = self.filter_supported_types([tf.int32, tf.int64, tf.float16, tf.float32])
+        int_types = [tf.int32, tf.int64]
+        dims = [1, 2, 3]
+        for dtype, dim in itertools.product(dtypes, dims):
+            with tf.device("/gpu:%s" % local_rank):
+                np.random.seed(1234)
+                factor = np.random.uniform()
+                tensor = self.random_uniform(
+                    [17] * dim, -100, 100, dtype=dtype)
+                summed = hvd.allreduce(tensor, average=False,
+                                       postscale_factor=factor)
+
+                multiplied = tensor * size
+                # Scaling done in FP64 math for integer types.
+                multiplied = tf.cast(multiplied, tf.float64 if dtype in int_types else dtype)
+                factor = tf.convert_to_tensor(factor, tf.float64 if dtype in int_types else dtype)
+                multiplied = tf.cast(factor * multiplied, dtype)
+                max_difference = tf.reduce_max(tf.abs(summed - multiplied))
+
+            # Threshold for floating point equality depends on number of
+            # ranks, since we're comparing against precise multiplication.
+            if size <= 3 or dtype in int_types:
+                threshold = 0
+            elif size < 10:
+                threshold = 1e-4
+            elif size < 15:
+                threshold = 5e-4
+            else:
+                break
+
+            diff = self.evaluate(max_difference)
+            self.assertTrue(diff <= threshold,
+                            "hvd.allreduce produces incorrect results")
 
     def test_horovod_allreduce_error(self):
         """Test that the allreduce raises an error if different ranks try to
@@ -1423,10 +1604,6 @@ class TensorFlowTests(tf.test.TestCase):
         rank = hvd.rank()
         size = hvd.size()
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         dtypes = [tf.uint8, tf.int8, tf.uint16, tf.int16,
                   tf.int32, tf.int64, tf.float16, tf.float32,
                   tf.float64]
@@ -1461,10 +1638,6 @@ class TensorFlowTests(tf.test.TestCase):
         if os.environ.get('HOROVOD_MIXED_INSTALL'):
             # Skip if compiled with CUDA but without HOROVOD_GPU_OPERATIONS.
             self.skipTest("Not compiled with HOROVOD_GPU_OPERATIONS")
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -1506,10 +1679,6 @@ class TensorFlowTests(tf.test.TestCase):
         rank = hvd.rank()
         size = hvd.size()
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         dtypes = [tf.uint8, tf.int8, tf.uint16, tf.int16,
                   tf.int32, tf.int64, tf.float16, tf.float32,
                   tf.float64]
@@ -1543,10 +1712,6 @@ class TensorFlowTests(tf.test.TestCase):
         if os.environ.get('HOROVOD_MIXED_INSTALL'):
             # Skip if compiled with CUDA but without HOROVOD_GPU_OPERATIONS.
             self.skipTest("Not compiled with HOROVOD_GPU_OPERATIONS")
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -1592,10 +1757,6 @@ class TensorFlowTests(tf.test.TestCase):
         if size == 1:
             self.skipTest("Only one worker available")
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         with tf.device("/cpu:0"):
             if rank % 2:
                 tensor = tf.ones([size], dtype=tf.int32)
@@ -1616,10 +1777,6 @@ class TensorFlowTests(tf.test.TestCase):
         if size == 1:
             self.skipTest("Only one worker available")
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         with tf.device("/cpu:0"):
             tensor = tf.ones([size + 1], dtype=tf.float32)
 
@@ -1633,9 +1790,9 @@ class TensorFlowTests(tf.test.TestCase):
         rank = hvd.rank()
         size = hvd.size()
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
+        # This test does not apply if there is only one worker.
+        if size == 1:
+            self.skipTest("Only one worker available")
 
         with tf.device("/cpu:0"):
             tensor = tf.ones([size-1], dtype=tf.float32)
@@ -1655,10 +1812,6 @@ class TensorFlowTests(tf.test.TestCase):
         if size == 1:
             self.skipTest("Only one worker available")
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         tensor_size = [2 * size] * 3
         tensor_size[1] = 10 * (rank + 1)
         with tf.device("/cpu:0"):
@@ -1672,10 +1825,6 @@ class TensorFlowTests(tf.test.TestCase):
         hvd.init()
         rank = hvd.rank()
         size = hvd.size()
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # As of TensorFlow v1.9, gradients are not supported on
         # integer tensors
@@ -1722,10 +1871,6 @@ class TensorFlowTests(tf.test.TestCase):
         if os.environ.get('HOROVOD_MIXED_INSTALL'):
             # Skip if compiled with CUDA but without HOROVOD_GPU_OPERATIONS.
             self.skipTest("Not compiled with HOROVOD_GPU_OPERATIONS")
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -1778,10 +1923,6 @@ class TensorFlowTests(tf.test.TestCase):
         rank = hvd.rank()
         size = hvd.size()
 
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
-
         # As of TensorFlow v1.9, gradients are not supported on
         # integer tensors
         dtypes = [tf.float32, tf.float64]
@@ -1825,10 +1966,6 @@ class TensorFlowTests(tf.test.TestCase):
         if os.environ.get('HOROVOD_MIXED_INSTALL'):
             # Skip if compiled with CUDA but without HOROVOD_GPU_OPERATIONS.
             self.skipTest("Not compiled with HOROVOD_GPU_OPERATIONS")
-
-        # This test does not apply if using gloo controller
-        if hvd.gloo_enabled():
-            self.skipTest("Alltoall currently does not support Gloo controller.")
 
         # This test does not apply if NCCL version < 2.7.0
         if hvd.nccl_built() and hvd.nccl_built() < 2700:
@@ -1930,9 +2067,6 @@ class TensorFlowTests(tf.test.TestCase):
             self.assertLess(err, 0.00000001)
 
     def test_broadcast_object(self):
-        if LooseVersion(tf.__version__) < LooseVersion('1.15.0'):
-            self.skipTest("Broadcasting object requires TensorFlow 1.15 or above")
-
         hvd.init()
 
         with tf.device("/cpu:0"):
@@ -1946,9 +2080,6 @@ class TensorFlowTests(tf.test.TestCase):
             self.assertDictEqual(obj, expected_obj)
 
     def test_broadcast_object_fn(self):
-        if LooseVersion(tf.__version__) < LooseVersion('1.15.0'):
-            self.skipTest("Broadcasting object requires TensorFlow 1.15 or above")
-
         if hvd._executing_eagerly() or _IS_TF2:
             # Only for TF 1.0 in graph mode
             return
@@ -1966,10 +2097,24 @@ class TensorFlowTests(tf.test.TestCase):
             obj = bcast(obj)
             self.assertDictEqual(obj, expected_obj)
 
-    def test_elastic_state(self):
-        if LooseVersion(tf.__version__) < LooseVersion('1.15.0'):
-            self.skipTest("Broadcasting object requires TensorFlow 1.15 or above")
+    def test_allgather_object(self):
+        hvd.init()
 
+        with tf.device("/cpu:0"):
+            d = {'metric_val_1': hvd.rank()}
+            if hvd.rank() == 1:
+                d['metric_val_2'] = 42
+
+            results = hvd.allgather_object(d)
+
+            expected = [{'metric_val_1': i} for i in range(hvd.size())]
+            if hvd.size() > 1:
+                expected[1] = {'metric_val_1': 1, 'metric_val_2': 42}
+
+            self.assertEqual(len(results), hvd.size())
+            self.assertListEqual(results, expected)
+
+    def test_elastic_state(self):
         if not hvd._executing_eagerly() and _IS_TF2:
             # Only support TF 2.0 in eager mode
             return
@@ -2043,17 +2188,22 @@ class TensorFlowTests(tf.test.TestCase):
         local_rank = hvd.local_rank()
         size = hvd.size()
 
+        # This test does not apply if there is only one worker.
+        if size == 1:
+            self.skipTest("Only one worker available")
+
+
         dtypes = [tf.int32, tf.int64, tf.float16, tf.float32, tf.float64]
         dims = [1, 2, 3]
         first_join_ranks = [0, 1]
 
         for dtype, dim, first_join_rank in itertools.product(dtypes, dims, first_join_ranks):
             with tf.device("/gpu:%d" % local_rank):
+                tensor = self.random_uniform(
+                        [17] * dim, -100, 100, dtype=dtype)
                 if local_rank == first_join_rank:
                     self.evaluate(hvd.join())
                 else:		
-                    tensor = self.random_uniform(
-                            [17] * dim, -100, 100, dtype=dtype)
                     summed = hvd.allreduce(tensor, average=False)
                     multiplied = tensor * (size-1)
                     max_difference = tf.reduce_max(tf.abs(summed - multiplied))
@@ -2101,10 +2251,7 @@ class TensorFlowTests(tf.test.TestCase):
             ]
 
             for x in x_list:
-                try:
-                    bn = tf.layers.BatchNormalization(axis=1)
-                except AttributeError:
-                    bn = tf.compat.v1.layers.BatchNormalization(axis=1)
+                bn = tf.keras.layers.BatchNormalization(axis=1, fused=False)
                 sync_bn = hvd.SyncBatchNormalization(axis=1)
                 bn_func = bn.apply(x, training=True)
                 sync_bn_func = sync_bn.apply(tf.expand_dims(x[hvd.rank()], 0), training=True)
@@ -2148,10 +2295,7 @@ class TensorFlowTests(tf.test.TestCase):
             ]
 
             for x in x_list:
-                try:
-                    bn = tf.layers.BatchNormalization(axis=1)
-                except AttributeError:
-                    bn = tf.compat.v1.layers.BatchNormalization(axis=1)
+                bn = tf.keras.layers.BatchNormalization(axis=1, fused=False)
                 sync_bn = hvd.SyncBatchNormalization(axis=1)
                 bn_func = bn.apply(x, training=True)
                 sync_bn_func = sync_bn.apply(tf.expand_dims(x[hvd.rank()], 0), training=True)
